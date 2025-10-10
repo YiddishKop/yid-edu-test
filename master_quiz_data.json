@@ -1,0 +1,19 @@
+{
+  "test_id": "EXAM_MVP_2025",
+  "quiz_list": [
+    {
+      "quiz_id": "Q_CALC001",
+      "question_type": "CALCULUS",
+      "question_latex": "Find the derivative of $f(x)=x^2+1$ at $x=2$. (Weight: 0.8)",
+      "solution_latex": "$$\\text{Sol: } f'(x) = 2x$$$$\\text{At } x=2 \\text{, } f'(2) = 4$$",
+      "answer": "$$4$$"
+    },
+    {
+      "quiz_id": "Q_GEO002",
+      "question_type": "GEOMETRY",
+      "question_latex": "Given the radius of a circle $r=5$, find its area.",
+      "solution_latex": "$$\\text{Sol: } A = \\pi r^2 = 25\\pi$$",
+      "answer": "$$25\\pi$$"
+    }
+  ]
+}
