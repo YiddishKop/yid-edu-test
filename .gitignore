@@ -1,0 +1,6 @@
+pdf_md_parts/
+word_md_parts/
+*.docx
+*.pdf
+*.aux
+*.log
