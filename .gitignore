@@ -4,3 +4,5 @@ word_md_parts/
 *.pdf
 *.aux
 *.log
+*.png
+*.md
