@@ -1,0 +1,11 @@
+[server]
+# 将项目根目录下的 'word_md_parts' 文件夹暴露给网络访问
+# 用户将可以通过 http://localhost:8501/app/static/word_md_parts/images/ 来访问图片
+# 注意：这里的 'app/static/' 是 Streamlit 内部的前缀
+# **你不需要在 Markdown 中写这个前缀，因为 Streamlit 最终会处理相对路径**
+
+# 我们应该只暴露图片所在的文件夹，即 'word_md_parts/images'
+# 但是 Streamlit 推荐暴露顶层文件夹，所以我们假设你的项目根目录是正确的。
+
+# 假设你的 Streamlit 脚本运行的当前工作目录就是项目根目录
+static_file_path = "word_md_parts"

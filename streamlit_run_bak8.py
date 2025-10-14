@@ -12,7 +12,7 @@ import base64
 
 from sqlalchemy import (
     create_engine, Column, Integer, Text, String,
-    TIMESTAMP, ARRAY, func, and_, or_, SmallInteger, text
+    TIMESTAMP, ARRAY, func, and_, or_, SmallInteger
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -110,16 +110,28 @@ def parse_pdf_bytes(file_bytes):
     with pdfplumber.open(stream) as pdf:
         return "\n\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
 
+# ✅ [修改] 修正 md_to_latex 函数以移除 \pandocbounded
 def md_to_latex(md_text):
+    """
+    使用 pypandoc 将 Markdown 转换为 LaTeX，并移除 pandoc 特定的 \pandocbounded 命令。
+    """
     if not md_text: return ""
     if pypandoc is None: return f"% (Warning: pypandoc not installed) \n{md_text}"
     try:
+        # 步骤 1: 正常使用 pypandoc 进行转换
         latex_output = pypandoc.convert_text(md_text, 'latex', format='md')
+        
+        # 步骤 2: 使用正则表达式移除 \pandocbounded{...} 包装器
+        # re.DOTALL 标志确保可以处理跨行的内容
         cleaned_latex = re.sub(r'\\pandocbounded{(.*?)}', r'\1', latex_output, flags=re.DOTALL)
+        
         return cleaned_latex
     except Exception as e:
         return f"% (pandoc convert failed: {e}) \n{md_text}"
 
+# ===============================
+# LaTeX -> SVG (xelatex + dvisvgm)
+# ===============================
 def latex_full_document_body(user_tex: str, image_base_path: Path):
     graphics_path_str = image_base_path.resolve().as_posix()
     preamble = rf"""
@@ -129,7 +141,9 @@ def latex_full_document_body(user_tex: str, image_base_path: Path):
 \usepackage{{fontspec}}
 \usepackage{{xeCJK}}
 \setCJKmainfont{{SimSun}}
+
 \graphicspath{{{{{graphics_path_str}/}}}}
+
 \pagestyle{{empty}}
 \parindent=0pt
 \begin{{document}}
@@ -146,6 +160,7 @@ def compile_latex_to_svg(tex_body: str, timeout=20):
         pdf_file = td_path / "preview.pdf"
         svg_file = td_path / "preview.svg"
         tex_file.write_text(tex_body, encoding="utf-8")
+
         try:
             proc = subprocess.run(
                 [XELATEX_CMD, "-interaction=nonstopmode", "-halt-on-error", str(tex_file.name)],
@@ -153,6 +168,7 @@ def compile_latex_to_svg(tex_body: str, timeout=20):
             )
         except subprocess.TimeoutExpired:
             return False, f"XeLaTeX 超时（>{timeout}s）。"
+
         if not pdf_file.exists():
             stdout = proc.stdout.decode("utf-8", errors="ignore")
             stderr = proc.stderr.decode("utf-8", errors="ignore")
@@ -161,18 +177,25 @@ def compile_latex_to_svg(tex_body: str, timeout=20):
                 try: logs += f"\n\n==== LOG: {path.name} ====\n" + path.read_text(encoding="utf-8", errors="ignore")
                 except Exception: pass
             return False, f"XeLaTeX 编译失败：\n{logs}"
+
         try:
             proc2 = subprocess.run(
                 [DVISVGM_CMD, "--pdf", str(pdf_file.name), "-n", "-o", str(svg_file.name)],
                 cwd=td, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False
             )
-        except subprocess.TimeoutExpired: return False, "dvisvgm 超时。"
+        except subprocess.TimeoutExpired:
+            return False, "dvisvgm 超时。"
+
         if not svg_file.exists():
             out2 = proc2.stdout.decode("utf-8", errors="ignore")
             err2 = proc2.stderr.decode("utf-8", errors="ignore")
             return False, f"dvisvgm 转换失败：\n{out2}\n{err2}"
+
         return True, svg_file.read_text(encoding="utf-8", errors="ignore")
 
+# ===============================
+# Login widget
+# ===============================
 def login_widget():
     if "logged_in" not in st.session_state: st.session_state.logged_in = False
     if not st.session_state.logged_in:
@@ -191,26 +214,23 @@ def login_widget():
         st.sidebar.success(f"已登录：{st.session_state.user}")
         if st.sidebar.button("登出"):
             st.session_state.logged_in = False
-            # 清理所有会话状态以避免数据混淆
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+            st.session_state.user = None
             st.rerun()
         return True
 
 # ===============================
 # App UI
 # ===============================
-st.set_page_config(page_title="题库管理系统", layout="wide")
-st.title("题库管理系统")
+st.set_page_config(page_title="题库管理（LaTeX 精确预览）", layout="wide")
+st.title("题库管理（LaTeX 精确预览）")
 
 if not login_widget():
     st.stop()
 
-left_col, middle_col, right_col = st.columns([2.5, 2.5, 2])
+left_col, right_col = st.columns([3, 2])
 
-# --- 左栏：负责题干 ---
 with left_col:
-    st.header("1. 题干编辑区")
+    st.header("上传 & 编辑（Markdown / LaTeX）")
     uploaded = st.file_uploader("上传 .md / .txt / .docx / .pdf", type=["md", "txt", "docx", "pdf"])
     default_md = ""
     if uploaded is not None:
@@ -223,104 +243,56 @@ with left_col:
         except Exception as e:
             st.error(f"解析文件失败：{e}")
 
-    if "content_md_buffer" not in st.session_state: st.session_state.content_md_buffer = default_md
-    if uploaded is not None and st.button("用上传内容覆盖题干"): st.session_state.content_md_buffer = default_md
-
-    md_text = st.text_area("题干 Markdown", value=st.session_state.content_md_buffer, height=220, key="content_md_editor")
-    st.markdown("**题干 Markdown 预览：**")
+    st.subheader("1) Markdown 编辑与预览")
+    if "markdown_buffer" not in st.session_state: st.session_state.markdown_buffer = default_md
+    if uploaded is not None and st.button("以上传内容覆盖编辑区"): st.session_state.markdown_buffer = default_md
+    md_text = st.text_area("Markdown 编辑", value=st.session_state.get("markdown_buffer",""), height=220)
+    st.session_state.markdown_buffer = md_text
+    st.markdown("**Markdown 预览：**")
     rendered_html_md = render_markdown_with_images(md_text, WORD_PARTS_FOLDER)
     st.markdown(rendered_html_md, unsafe_allow_html=True)
 
     st.markdown("---")
     auto_latex = md_to_latex(md_text)
-    if "content_latex_buffer" not in st.session_state: st.session_state.content_latex_buffer = auto_latex
-    if st.button("自动生成 LaTeX 题干"): st.session_state.content_latex_buffer = auto_latex
-    latex_text = st.text_area("题干 LaTeX", value=st.session_state.content_latex_buffer, height=260, key="content_latex_editor")
+    st.subheader("2) LaTeX 编辑（基于 Markdown 自动生成）")
+    if "latex_buffer" not in st.session_state: st.session_state.latex_buffer = auto_latex
+    if st.button("用自动生成的 LaTeX 覆盖编辑区"): st.session_state.latex_buffer = auto_latex
+    latex_text = st.text_area("LaTeX 编辑", value=st.session_state.get("latex_buffer",""), height=260)
+    st.session_state.latex_buffer = latex_text
 
-    st.markdown("**题干 LaTeX 精确预览**")
-    if st.button("编译题干 LaTeX"):
+    st.markdown("**3) 精确 LaTeX 预览（XeLaTeX + dvisvgm -> SVG）**")
+    if st.button("生成精确预览 (编译 LaTeX)"):
         image_base_path = Path(WORD_PARTS_FOLDER)
         doc = latex_full_document_body(latex_text, image_base_path)
         success, result = compile_latex_to_svg(doc, timeout=25)
-        st.session_state._content_preview_success = success
-        st.session_state._content_preview_result = result
+        st.session_state._latex_preview_success = success
+        st.session_state._latex_preview_result = result
     
-    if "_content_preview_result" in st.session_state:
-        if st.session_state._content_preview_success:
-            components.html(st.session_state._content_preview_result, height=300, scrolling=True)
+    if "_latex_preview_result" in st.session_state:
+        if st.session_state._latex_preview_success:
+            components.html(st.session_state._latex_preview_result, height=300, scrolling=True)
         else:
-            st.error("题干 LaTeX 编译失败：")
-            st.text(st.session_state._content_preview_result[:10000])
+            st.error("LaTeX 编译或转换失败，以下为错误日志：")
+            st.text(st.session_state._latex_preview_result[:10000])
 
     st.markdown("---")
-    st.header("3. 题目元信息")
+    st.subheader("4) 结构化元信息（将写入字段）")
     title = st.text_input("题目标题或简述")
     col_ids_1, col_ids_2, col_ids_3 = st.columns(3)
-    
-    # ✅ [修改] 使用 text() 包装器执行原生 SQL
-    db_session = SessionLocal()
-    try:
-        query = text("SELECT e.enumlabel FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid WHERE t.typname = 'question_type_enum' ORDER BY e.enumsortorder")
-        result = db_session.execute(query).fetchall()
-        allowed_types = [row[0] for row in result]
-    finally:
-        db_session.close()
-
     with col_ids_1: course_id = st.number_input("课程 ID", min_value=0, value=0, step=1)
     with col_ids_2: grade_id = st.number_input("年级 ID", min_value=0, value=0, step=1)
     with col_ids_3: chapter_id = st.number_input("章节 ID", min_value=0, value=0, step=1)
-    
-    q_type = st.selectbox("题目类型", options=allowed_types)
+    q_type = st.text_input("题目类型（单选/多选/解答）")
     difficulty = st.number_input("难度（1-5）", 1, 5, 3)
     quality = st.number_input("题目质量 (1-5)", 1, 5, 3)
+    answer = st.text_input("答案")
+    analysis = st.text_area("解析")
     kp_raw = st.text_input("知识点（逗号分隔）")
-    meta_raw = st.text_area("额外 metadata JSON（可选）", value="{}")
+    meta_raw = st.text_area("额外 metadata JSON（可选）", value="")
 
-# --- 中栏：负责答案和解析 ---
-with middle_col:
-    st.header("2. 答案与解析编辑区")
-    
-    st.subheader("答案")
-    if "answer_buffer" not in st.session_state: st.session_state.answer_buffer = ""
-    answer_text = st.text_area("答案内容", value=st.session_state.answer_buffer, height=100, key="answer_editor")
-    
-    st.markdown("---")
-
-    st.subheader("解析")
-    if "analysis_md_buffer" not in st.session_state: st.session_state.analysis_md_buffer = ""
-    analysis_md_text = st.text_area("解析 Markdown", value=st.session_state.analysis_md_buffer, height=220, key="analysis_md_editor")
-    st.markdown("**解析 Markdown 预览：**")
-    rendered_analysis_md = render_markdown_with_images(analysis_md_text, WORD_PARTS_FOLDER)
-    st.markdown(rendered_analysis_md, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    auto_analysis_latex = md_to_latex(analysis_md_text)
-    if "analysis_latex_buffer" not in st.session_state: st.session_state.analysis_latex_buffer = auto_analysis_latex
-    if st.button("自动生成 LaTeX 解析"): st.session_state.analysis_latex_buffer = auto_analysis_latex
-    analysis_latex_text = st.text_area("解析 LaTeX", value=st.session_state.analysis_latex_buffer, height=260, key="analysis_latex_editor")
-
-    st.markdown("**解析 LaTeX 精确预览**")
-    if st.button("编译解析 LaTeX"):
-        image_base_path = Path(WORD_PARTS_FOLDER)
-        doc = latex_full_document_body(analysis_latex_text, image_base_path)
-        success, result = compile_latex_to_svg(doc, timeout=25)
-        st.session_state._analysis_preview_success = success
-        st.session_state._analysis_preview_result = result
-
-    if "_analysis_preview_result" in st.session_state:
-        if st.session_state._analysis_preview_success:
-            components.html(st.session_state._analysis_preview_result, height=300, scrolling=True)
-        else:
-            st.error("解析 LaTeX 编译失败：")
-            st.text(st.session_state._analysis_preview_result[:10000])
-
-# --- 提交按钮放在中栏底部 ---
-with middle_col:
-    st.markdown("---")
-    st.header("4. 提交操作")
-    if st.button("✅ 确认并写入数据库", use_container_width=True):
-        if not st.session_state.get("_content_preview_success", False):
-            st.warning("请先成功编译“题干 LaTeX”再保存。")
+    if st.button("✅ 确认 LaTeX 并写入数据库"):
+        if not st.session_state.get("_latex_preview_success", False):
+            st.warning("请先点击“生成精确预览 (编译 LaTeX)”并确认渲染结果无误，再保存。")
         else:
             db = SessionLocal()
             try:
@@ -329,21 +301,15 @@ with middle_col:
                     try: extra_meta = json.loads(meta_raw.replace("\\","/"))
                     except Exception: st.warning("额外 metadata 不是合法 JSON，已存空对象。")
                 kp_list = [kp.strip() for kp in kp_raw.split(",")] if kp_raw.strip() else None
-                
                 q = Question(
-                    title=title or None,
-                    content_md=st.session_state.content_md_editor or None,
-                    content_latex=st.session_state.content_latex_editor or None,
+                    title=title or None, content_md=md_text or None, content_latex=latex_text or None,
                     course_id=course_id if course_id > 0 else None,
                     grade_id=grade_id if grade_id > 0 else None,
                     chapter_id=chapter_id if chapter_id > 0 else None,
-                    knowledge_points=kp_list,
-                    question_type=q_type or None,
+                    knowledge_points=kp_list, question_type=q_type or None,
                     difficulty=int(difficulty) if difficulty else None,
-                    answer=st.session_state.answer_editor or None,
-                    analysis=st.session_state.analysis_md_editor or None,
-                    extra_metadata=extra_meta,
-                    quality=int(quality) if quality else None
+                    answer=answer or None, analysis=analysis or None,
+                    extra_metadata=extra_meta, quality=int(quality) if quality else None
                 )
                 db.add(q)
                 db.commit()
@@ -353,61 +319,100 @@ with middle_col:
                 st.error(f"写入失败：{traceback.format_exc()}")
             finally: db.close()
 
-# --- 右栏：负责浏览 ---
 with right_col:
-    st.header("题库浏览")
+    st.header("题库浏览 / 搜索 / 分页")
     db = SessionLocal()
     try:
-        course_id_filter = st.number_input("课程 ID 过滤", 0, key="f_course_id")
-        type_filter = st.selectbox("题型过滤", options=[""] + allowed_types, key="f_type")
-        keyword = st.text_input("关键字搜索 (标题/内容)")
-        
+        col_filter_1, col_filter_2, col_filter_3 = st.columns(3)
+        with col_filter_1: course_id_filter = st.number_input("课程 ID 过滤", 0, key="f_course_id")
+        with col_filter_2: grade_id_filter = st.number_input("年级 ID 过滤", 0, key="f_grade_id")
+        with col_filter_3: chapter_id_filter = st.number_input("章节 ID 过滤", 0, key="f_chapter_id")
+        type_filter = st.text_input("题型过滤")
+        diff_min, diff_max = st.slider("难度范围", 1, 5, (1,5))
+        quality_min, quality_max = st.slider("质量范围", 1, 5, (1,5))
+        keyword = st.text_input("按标题或内容关键字搜索")
         query = db.query(Question)
         filters = []
         if course_id_filter > 0: filters.append(Question.course_id == course_id_filter)
-        if type_filter: filters.append(Question.question_type == type_filter)
+        if grade_id_filter > 0: filters.append(Question.grade_id == grade_id_filter)
+        if chapter_id_filter > 0: filters.append(Question.chapter_id == chapter_id_filter)
+        if type_filter.strip(): filters.append(Question.question_type.ilike(f"%{type_filter.strip()}%"))
+        filters.append(Question.difficulty.between(diff_min, diff_max))
+        filters.append(Question.quality.between(quality_min, quality_max))
         if keyword.strip():
             kw = f"%{keyword.strip()}%"
-            filters.append(or_(Question.title.ilike(kw), Question.content_md.ilike(kw)))
+            filters.append(or_(Question.title.ilike(kw), Question.content_md.ilike(kw), Question.content_latex.ilike(kw)))
         if filters: query = query.filter(and_(*filters))
-        
-        page_size = st.number_input("每页显示", 5, 200, 10, 5)
+        page_size = st.number_input("每页显示数量", 5, 200, 10, 5)
         total = query.count()
         total_pages = max(1, math.ceil(total / page_size))
-        page = st.number_input(f"页码 (1-{total_pages})", 1, total_pages, 1)
+        page = st.number_input(f"页码 (1 - {total_pages})", 1, total_pages, 1)
         offset = (page - 1) * page_size
         records = query.order_by(Question.id.desc()).offset(offset).limit(page_size).all()
-        
-        st.write(f"共 {total} 条记录 — 第 {page}/{total_pages} 页")
+        st.write(f"共 {total} 条匹配记录 — 第 {page} / {total_pages} 页")
         
         for r in records:
-            with st.expander(f"ID {r.id} | {r.title or '(无标题)'}"):
-                st.markdown(f"**类型:** {r.question_type} | **难度:** {r.difficulty} | **质量:** {r.quality}")
-                st.markdown("**题干预览:**")
+            with st.expander(f"ID {r.id}  | 标题: {r.title or '(无)'}"):
+                st.markdown(f"**课程 ID:** {r.course_id} | **年级 ID:** {r.grade_id} | **章节 ID:** {r.chapter_id} | **题型:** {r.question_type} | **难度:** {r.difficulty} | **质量:** {r.quality}")
+                st.markdown("**Markdown 预览:**")
                 rendered_record_md = render_markdown_with_images(r.content_md or "", WORD_PARTS_FOLDER)
                 st.markdown(rendered_record_md, unsafe_allow_html=True)
-                st.markdown("**答案:**")
-                st.info(r.answer or "无")
-                st.markdown("**解析预览:**")
-                rendered_record_analysis = render_markdown_with_images(r.analysis or "", WORD_PARTS_FOLDER)
-                st.markdown(rendered_record_analysis, unsafe_allow_html=True)
-
-                if st.button(f"✏️ 加载此题进行编辑 (ID {r.id})", key=f"edit_btn_{r.id}"):
-                    st.session_state.content_md_buffer = r.content_md or ""
-                    st.session_state.content_latex_buffer = r.content_latex or ""
-                    st.session_state.answer_buffer = r.answer or ""
-                    st.session_state.analysis_md_buffer = r.analysis or ""
-                    st.session_state.analysis_latex_buffer = md_to_latex(r.analysis or "")
-                    
-                    st.session_state.pop('_content_preview_result', None)
-                    st.session_state.pop('_analysis_preview_result', None)
-
-                    st.info(f"ID {r.id} 的数据已加载到左侧和中间的编辑区。")
+                st.markdown("**LaTeX (raw):**")
+                st.code((r.content_latex or "")[:2000], language="latex")
+                st.markdown("**额外 metadata:**")
+                st.json(r.extra_metadata or {})
+                if st.button(f"✏️ 编辑此题 (ID {r.id})", key=f"edit_btn_{r.id}"):
+                    st.session_state["edit_id"] = r.id
                     st.rerun()
 
+        if "edit_id" in st.session_state:
+            edit_id = st.session_state["edit_id"]
+            instance = db.query(Question).filter(Question.id == edit_id).first()
+            if instance:
+                st.markdown("---")
+                st.subheader(f"编辑题目 ID: {edit_id}")
+                e_title = st.text_input("标题", value=instance.title or "", key=f"e_title_{edit_id}")
+                col_e_1, col_e_2, col_e_3 = st.columns(3)
+                with col_e_1: e_course_id = st.number_input("课程 ID", 0, value=instance.course_id or 0, key=f"e_course_{edit_id}")
+                with col_e_2: e_grade_id = st.number_input("年级 ID", 0, value=instance.grade_id or 0, key=f"e_grade_{edit_id}")
+                with col_e_3: e_chapter_id = st.number_input("章节 ID", 0, value=instance.chapter_id or 0, key=f"e_chapter_{edit_id}")
+                e_type = st.text_input("题型", value=instance.question_type or "", key=f"e_type_{edit_id}")
+                e_difficulty = st.number_input("难度", 1, 5, value=instance.difficulty or 3, key=f"e_diff_{edit_id}")
+                e_quality = st.number_input("质量", 1, 5, value=instance.quality or 3, key=f"e_qual_{edit_id}")
+                e_answer = st.text_input("答案", value=instance.answer or "", key=f"e_ans_{edit_id}")
+                e_analysis = st.text_area("解析", value=instance.analysis or "", key=f"e_anal_{edit_id}")
+                e_kp = st.text_input("知识点", value=",".join(instance.knowledge_points or []), key=f"e_kp_{edit_id}")
+                e_meta_raw = st.text_area("额外 metadata JSON", value=json.dumps(instance.extra_metadata or {}, ensure_ascii=False), key=f"e_meta_{edit_id}")
+                
+                if st.button("💾 保存修改", key=f"e_save_{edit_id}"):
+                    try:
+                        kp_list = [kp.strip() for kp in e_kp.split(",")] if e_kp.strip() else None
+                        try: e_meta_parsed = json.loads(e_meta_raw.replace("\\", "/"))
+                        except Exception: e_meta_parsed = instance.extra_metadata or {}
+                        instance.title = e_title or None
+                        instance.course_id = e_course_id if e_course_id > 0 else None
+                        instance.grade_id = e_grade_id if e_grade_id > 0 else None
+                        instance.chapter_id = e_chapter_id if e_chapter_id > 0 else None
+                        instance.question_type = e_type or None
+                        instance.difficulty = int(e_difficulty) if e_difficulty else None
+                        instance.quality = int(e_quality) if e_quality else None
+                        instance.answer = e_answer or None
+                        instance.analysis = e_analysis or None
+                        instance.knowledge_points = kp_list
+                        instance.extra_metadata = e_meta_parsed
+                        db.commit()
+                        st.success("保存成功")
+                        del st.session_state["edit_id"]
+                        st.rerun() 
+                    except Exception as e:
+                        db.rollback()
+                        st.error(f"保存失败: {e}")
+            else:
+                st.warning("未找到该记录")
+                del st.session_state["edit_id"]
     except Exception as e:
         st.error(f"查询失败：{e}")
         st.exception(traceback.format_exc())
     finally:
-        if db.is_active:
+        if db.is_active and 'edit_id' not in st.session_state:
             db.close()
