@@ -29,7 +29,8 @@ if not PDF_PATH.exists():
     sys.exit(1)
 
 DOC_BASE_NAME = PDF_PATH.stem
-PARTS_OUTPUT_DIR = PROJECT_ROOT
+PARTS_OUTPUT_DIR = PROJECT_ROOT / "pdf_md_parts"
+PARTS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 IMG_DIR_PATH = PROJECT_ROOT / IMAGES_SUBFOLDER / DOC_BASE_NAME
 IMG_DIR_PATH.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +39,8 @@ IMG_DIR_PATH.mkdir(parents=True, exist_ok=True)
 # ===============================
 pages_content = []
 pos_counter = 0
+# 文档级图片序号（image_1.png, image_2.png ...）
+image_seq = 1
 
 doc = fitz.open(str(PDF_PATH))
 
@@ -51,7 +54,7 @@ for page_index in range(len(doc)):
         xref = img[0]
         base_image = doc.extract_image(xref)
         image_bytes = base_image["image"]
-        img_name = f"{DOC_BASE_NAME}_p{page_index+1}_{img_idx}.png"
+        img_name = f"image_{image_seq}.png"
         img_path = IMG_DIR_PATH / img_name
         try:
             with WandImage(blob=image_bytes) as wi:
@@ -65,6 +68,7 @@ for page_index in range(len(doc)):
             except Exception:
                 continue
         page_images.append(f"{IMAGES_SUBFOLDER}/{DOC_BASE_NAME}/{img_name}")
+        image_seq += 1
 
     pages_content.append({
         'start': pos_counter,
@@ -142,12 +146,8 @@ for i, part in enumerate(parts, 1):
     for img_rel in part_images:
         part_text += f"\n\n![image]({img_rel})\n"
 
-    # 生成文件名并保存到项目根目录
-    label_fragment = sanitize_label(part.get('label'))
-    if label_fragment:
-        filename = PARTS_OUTPUT_DIR / f"word_part_{DOC_BASE_NAME}_{i}_{label_fragment}.md"
-    else:
-        filename = PARTS_OUTPUT_DIR / f"word_part_{DOC_BASE_NAME}_{i}.md"
+    # 生成文件名并保存到 pdf_md_parts 目录，命名为 pdf_part_<i>.md
+    filename = PARTS_OUTPUT_DIR / f"pdf_part_{i}.md"
     with open(filename, "w", encoding="utf-8") as f:
         f.write(part_text)
 
